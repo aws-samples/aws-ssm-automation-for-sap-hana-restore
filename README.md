@@ -23,7 +23,7 @@ For more details on its usage see the blog.
 1. In CloudFormation, select Create Stack and populate the required parameters or leave them as the defaults, ensuring that they are unique in your account. Select Next, then under configure stack options select Next, review the inputs and select Create Stack. Note: If you are redeploying this template, consider deleting old stacks.
 
 <p align="center">
-<img src="images/image-specify-stack-details2.png" alt="image-specify-stack-details" width=80%>
+<img src="images/image-specify-stack-details.png" alt="image-specify-stack-details" width=80%>
 </p>
 
 ## Usage
@@ -56,7 +56,8 @@ Execution status for Restore with BACKUP_ID
 
 Execution status for Restore with BACKUP_ID and Log Backups 
 
-
-
+<p align="center">
+<img src="images/image-ssm-execution-status2.png" alt="image-ssm-execution-status2" width=80% >
+</p>
 
 ***
