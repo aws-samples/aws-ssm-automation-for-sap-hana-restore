@@ -1,0 +1,276 @@
+---
+## HANA Restore Automation Document 
+## (c) AWS Professional Services
+#   This code was written by AWS Professional Services SAP Specialists
+#   This sample code is provided on an "AS IS" BASIS,
+#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+        - Label:
+            default: "SSM Document Name"
+          Parameters:
+            - SSMSAPStartStopDocName
+Parameters:
+  SSMSAPStartStopDocName:
+    Description: (Required) The SSM Automation Document or Runbook Name. Must be unique
+    Type: String
+    Default: hana-restore-logbackup
+Resources:
+  SapSsmDocument:
+    Type: "AWS::SSM::Document"
+    Properties:
+      DocumentType : Automation
+      Name: !Ref SSMSAPStartStopDocName
+      Content:
+        description: HANA Scale-Out Restore
+        schemaVersion: '0.3'
+        assumeRole: '{{ AutomationAssumeRole }}'
+        parameters:
+          AutomationAssumeRole:
+            default: ''
+            description: >-
+              (Optional) The ARN of the role that allows Automation to perform the
+              actions on your behalf.
+            type: String
+          Operation:
+            description: (Required) Choose RESTORE-HANA
+            type: String
+            allowedValues:
+              - RESTORE-HANA-WITH-BACKUPID-AND-LOGBACKUP
+              - RESTORE-HANA-WITH-BACKUPID
+            default: RESTORE-HANA-WITH-BACKUPID
+          AWSREGION:
+            description: Region where target hana is deployed
+            type: String
+            default: us-east-2
+          SOURCESID:
+            description: (Required) Provide the SID of the source HANA 
+            type: String
+            default: XXX
+          TARGETSID:
+            description: (Required) Provide the SID of the target HANA 
+            type: String
+            default: YYY
+          SIDTagKey:
+            description: (Required) The Tag Key for SID Storage
+            type: String
+            default: ssmsap:sid
+          RoleTagKey:
+            description: >-
+              (Required) The Tag Key for Role
+            type: String
+            default: ssmsap:role
+          SSMEnableTagKey:
+            description: >-
+              (Required) The Tag Key SSM enable
+            type: String
+            default: ssmsap:enabled
+          TARGETDBSYSTEMNO:
+            description: hdbuserstore Target System DB SYSTEM User key for root user
+            default: 'XX' 
+            type: String
+          BACKUPID:
+            description: hdbuserstore Target System DB SYSTEM User key for root user
+            default: 'XXXX' 
+            type: String
+          DATEANDTIME:
+            description: Log backup date and time in format 'YYYY-MM-DD HH:MN:SC'. Ignore this for option RESTORE-HANA-WITH-BACKUPID
+            default: 'YYYY-MM-DD HH:MM:SS'
+            type: String
+        mainSteps:
+        - name: BRANCH_DecideOperation
+          description: This step uses the Operation parameter defined above (Stop/Start) to select which actions to perform.
+          action: 'aws:branch'
+          inputs:
+            Choices:
+              - NextStep: 01_START_QUERY_AWS_TARGETDBInstanceId
+                Variable: '{{Operation}}'
+                StringEquals: RESTORE-HANA-WITH-BACKUPID-AND-LOGBACKUP
+              - NextStep: 02_START_QUERY_AWS_TARGETDBInstanceId
+                Variable: '{{Operation}}'
+                StringEquals: RESTORE-HANA-WITH-BACKUPID
+        - name: 01_START_QUERY_AWS_TARGETDBInstanceId
+          description: Query the source database instance based on the SID and Role tag
+          action: 'aws:executeAwsApi'
+          inputs:
+            Service: ec2
+            Api: DescribeInstances
+            Filters:
+              - Name: 'tag:{{SIDTagKey}}'
+                Values:
+                  - '*{{TARGETSID}}*'
+              - Name: 'tag:{{RoleTagKey}}'
+                Values:
+                  - 'HANAMASTER'
+              - Name: 'tag:{{SSMEnableTagKey}}'
+                Values:
+                  - 'TRUE'
+          outputs:
+            - Name: DBInstanceId
+              Selector: '$.Reservations[0].Instances[0].InstanceId'
+              Type: String
+          onFailure: Abort
+          nextStep: 01_SUSPEND_LOG_BACKUPS
+        - name: 01_SUSPEND_LOG_BACKUPS
+          description: Suspend Log backups
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 01_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - '/usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "ALTER SYSTEM ALTER CONFIGURATION (''global.ini'', ''SYSTEM'') SET (''persistence'', ''enable_auto_log_backup'') = ''no''"'
+          nextStep: 01_STOP_TENANT_DB
+        - name: 01_STOP_TENANT_DB
+          description: Import backup root key to the target database
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 01_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - /usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "ALTER SYSTEM STOP DATABASE {{ TARGETSID }}"
+          nextStep: 01_HANA_DB_RESTORE
+        - name: 01_HANA_DB_RESTORE
+          description: Import backup root key to the target database
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 01_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - /usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j " RECOVER DATABASE FOR {{ TARGETSID }}  UNTIL TIMESTAMP '{{ DATEANDTIME }}' CLEAR LOG USING SOURCE '{{ SOURCESID }}@{{ SOURCESID }}' USING CATALOG BACKINT USING LOG PATH ('/usr/sap/{{ SOURCESID }}/SYS/global/hdb/backint/DB_{{ SOURCESID }}') USING DATA PATH ('/usr/sap/{{ SOURCESID }}/SYS/global/hdb/backint/DB_{{ SOURCESID }}/') USING BACKUP_ID {{ BACKUPID }} CHECK ACCESS USING BACKINT "
+          nextStep: 01_RESUME_LOG_BACKUPS
+        - name: 01_RESUME_LOG_BACKUPS
+          description: Import backup root key to the target database
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 01_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - '/usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "ALTER SYSTEM ALTER CONFIGURATION (''global.ini'', ''SYSTEM'') SET (''persistence'', ''enable_auto_log_backup'') = ''yes''"'
+          nextStep: STATUS_REPORT_BACK
+        - name: 02_START_QUERY_AWS_TARGETDBInstanceId
+          description: Query the source database instance based on the SID and Role tag
+          action: 'aws:executeAwsApi'
+          inputs:
+            Service: ec2
+            Api: DescribeInstances
+            Filters:
+              - Name: 'tag:{{SIDTagKey}}'
+                Values:
+                  - '*{{TARGETSID}}*'
+              - Name: 'tag:{{RoleTagKey}}'
+                Values:
+                  - 'HANAMASTER'
+              - Name: 'tag:{{SSMEnableTagKey}}'
+                Values:
+                  - 'TRUE'
+          outputs:
+            - Name: DBInstanceId
+              Selector: '$.Reservations[0].Instances[0].InstanceId'
+              Type: String
+          onFailure: Abort
+          nextStep: 02_SUSPEND_LOG_BACKUPS
+        - name: 02_SUSPEND_LOG_BACKUPS
+          description: Suspend Log backups
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 02_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - '/usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "ALTER SYSTEM ALTER CONFIGURATION (''global.ini'', ''SYSTEM'') SET (''persistence'', ''enable_auto_log_backup'') = ''no''"'
+          nextStep: 02_STOP_TENANT_DB
+        - name: 02_STOP_TENANT_DB
+          description: Import backup root key to the target database
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 02_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - /usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "ALTER SYSTEM STOP DATABASE {{ TARGETSID }}"
+          nextStep: 02_HANA_DB_RESTORE
+        - name: 02_HANA_DB_RESTORE
+          description: Import backup root key to the target database
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 02_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - /usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "RECOVER DATA FOR {{ TARGETSID }} USING SOURCE '{{ SOURCESID }}@{{ SOURCESID }}' USING BACKUP_ID {{ BACKUPID}} USING CATALOG BACKINT USING DATA PATH ('/usr/sap/{{ SOURCESID }}/SYS/global/hdb/backint/DB_{{ SOURCESID }}/') CLEAR LOG"
+          nextStep: 02_RESUME_LOG_BACKUPS
+        - name: 02_RESUME_LOG_BACKUPS
+          description: Import backup root key to the target database
+          action: 'aws:runCommand'
+          maxAttempts: 1
+          onFailure: Abort
+          inputs:
+            DocumentName: AWS-RunShellScript
+            InstanceIds:
+              - '{{ 02_START_QUERY_AWS_TARGETDBInstanceId.DBInstanceId }}'
+            Parameters:
+              commands:
+                - '#!/bin/bash'
+                - 'SID={{ TARGETSID }}'
+                - 'SIDLower=${SID,,}'
+                - '/usr/sap/{{ TARGETSID }}/HDB{{ TARGETDBSYSTEMNO }}/exe/hdbsql -U SYSTEM -j "ALTER SYSTEM ALTER CONFIGURATION (''global.ini'', ''SYSTEM'') SET (''persistence'', ''enable_auto_log_backup'') = ''yes''"'
+          nextStep: STATUS_REPORT_BACK
+        - name: STATUS_REPORT_BACK
+          description: Status report back
+          action: 'aws:sleep'
+          inputs: 
+            Duration: PT5S
+          isEnd: true
+Outputs:
+  SapSsmDocument:
+    Description: Name of the SAP Automation Document
+    Value: !Ref SapSsmDocument
